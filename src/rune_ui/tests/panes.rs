@@ -376,6 +376,7 @@ fn contributed_options_are_labs_toggles_off_by_default() {
         "lab-pause-browser",
         "lab-keep-on-clipboard",
         "lab-copy-only",
+        "lab-type-instead-of-paste",
         "lab-spoken-formatting",
         "lab-filler-words",
         "lab-spoken-symbols",
@@ -401,6 +402,9 @@ fn contributed_options_are_labs_toggles_off_by_default() {
     assert!(!rt.state.settings.labs.copy_only);
     tap(&mut rt, "lab-copy-only");
     assert!(rt.state.settings.labs.copy_only);
+    assert!(!rt.state.settings.labs.type_instead_of_paste);
+    tap(&mut rt, "lab-type-instead-of-paste");
+    assert!(rt.state.settings.labs.type_instead_of_paste);
 
     // Tall enough that the last Labs rows (Share shortcut, Terminal paste)
     // sit inside the window, where a tap reaches them.
@@ -414,6 +418,9 @@ fn contributed_options_are_labs_toggles_off_by_default() {
     assert!(rt.find("lab-spoken-formatting").is_some(), "every OS");
     assert!(rt.find("lab-filler-words").is_some(), "every OS");
     assert!(rt.find("lab-spoken-symbols").is_some(), "every OS");
+    assert!(rt.find("lab-type-instead-of-paste").is_some(), "every OS");
+    tap(&mut rt, "lab-type-instead-of-paste");
+    assert!(rt.state.settings.labs.type_instead_of_paste);
     assert!(!rt.state.settings.share_dictation_shortcut);
     tap(&mut rt, "lab-share-shortcut");
     assert!(rt.state.settings.share_dictation_shortcut);

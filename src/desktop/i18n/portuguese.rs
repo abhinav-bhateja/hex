@@ -1065,6 +1065,8 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("In the background", "Em segundo plano"),
     ("Dictation indicator", "Indicador de ditado"),
     ("Record your screen, draw on it, and talk over it with a shortcut", "Grave a tela, desenhe nela e narre com um atalho"),
+    ("Type instead of pasting", "Digitar em vez de colar"),
+    ("Type the dictation key by key instead of pasting it, leaving the clipboard untouched", "Digita o ditado tecla por tecla em vez de colá-lo, sem tocar na área de transferência"),
 ];
 
 #[cfg(test)]

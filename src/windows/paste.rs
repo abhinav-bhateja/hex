@@ -10,8 +10,8 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 use windows_sys::Win32::System::DataExchange::{CountClipboardFormats, GetClipboardSequenceNumber};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyboardLayout, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, MapVirtualKeyExW, SendInput, VK_CONTROL, VK_LWIN, VK_MENU,
-    VK_RWIN, VK_SHIFT, VK_V,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, MapVirtualKeyExW, SendInput, VK_CONTROL,
+    VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -121,6 +121,12 @@ impl WindowsPaster {
     pub fn paste(&mut self, text: &str) -> Result<()> {
         if text.trim().is_empty() {
             return Err(eyre!("refusing to paste an empty transcript"));
+        }
+        // Labs › Type instead of pasting: keystrokes instead of the
+        // clipboard, so there is nothing to snapshot or restore afterwards.
+        if crate::labs::type_instead_of_paste() {
+            wait_for_conflicting_modifiers();
+            return type_text(text);
         }
         let mut restore = self
             .clipboard_restore
@@ -295,6 +301,58 @@ fn send_inputs(inputs: &[INPUT]) -> u32 {
     }
 }
 
+/// Types `text` as synthetic keystrokes, never touching the clipboard.
+fn type_text(text: &str) -> Result<()> {
+    let inputs = typing_inputs(text, foreground_scan_code(VK_RETURN));
+    let sent = send_inputs(&inputs);
+    if sent != inputs.len() as u32 {
+        // Release only keys this typing pressed, as `send_paste_shortcut` does.
+        let cleanup = inputs
+            .iter()
+            .filter(|input| unsafe { input.Anonymous.ki.dwFlags } & KEYEVENTF_KEYUP != 0)
+            .copied()
+            .collect::<Vec<_>>();
+        send_inputs(&cleanup);
+        return Err(eyre!(
+            "Windows accepted only {sent} of {} synthetic typing events; an elevated target window may reject input",
+            inputs.len()
+        ));
+    }
+    Ok(())
+}
+
+/// One key down/up pair per UTF-16 unit of `text`: `KEYEVENTF_UNICODE`
+/// carries the unit in `wScan`, so any layout types it. `\r\n`, `\n`, and
+/// `\r` each become one Return press with the foreground layout's scan
+/// code. Pure, so tests cover it without sending input.
+fn typing_inputs(text: &str, return_scan: u16) -> Vec<INPUT> {
+    fn flush(units: &mut Vec<u16>, inputs: &mut Vec<INPUT>) {
+        for unit in units.drain(..) {
+            inputs.push(keyboard_input(0, unit, KEYEVENTF_UNICODE));
+            inputs.push(keyboard_input(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+        }
+    }
+
+    let mut inputs = Vec::new();
+    let mut units = Vec::new();
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if matches!(character, '\r' | '\n') {
+            if character == '\r' {
+                characters.next_if_eq(&'\n');
+            }
+            flush(&mut units, &mut inputs);
+            inputs.push(keyboard_input(VK_RETURN, return_scan, 0));
+            inputs.push(keyboard_input(VK_RETURN, return_scan, KEYEVENTF_KEYUP));
+            continue;
+        }
+        let mut encoded = [0; 2];
+        units.extend_from_slice(character.encode_utf16(&mut encoded));
+    }
+    flush(&mut units, &mut inputs);
+    inputs
+}
+
 fn keyboard_input(key: u16, scan: u16, flags: u32) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
@@ -375,6 +433,66 @@ mod tests {
                 (ki.wVk, ki.dwFlags & KEYEVENTF_KEYUP != 0)
             })
             .collect()
+    }
+
+    fn typed(inputs: &[INPUT]) -> Vec<(u16, u16, u32)> {
+        inputs
+            .iter()
+            .map(|input| {
+                let ki = unsafe { input.Anonymous.ki };
+                (ki.wVk, ki.wScan, ki.dwFlags)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn typing_sends_each_unit_as_unicode_down_then_up() {
+        assert_eq!(
+            typed(&typing_inputs("hi", 0x1C)),
+            [
+                (0, u16::from(b'h'), KEYEVENTF_UNICODE),
+                (0, u16::from(b'h'), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+                (0, u16::from(b'i'), KEYEVENTF_UNICODE),
+                (0, u16::from(b'i'), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+            ]
+        );
+        assert!(typing_inputs("", 0x1C).is_empty());
+    }
+
+    #[test]
+    fn typing_sends_each_line_break_as_one_return() {
+        let inputs = typing_inputs("a\nb\r\nc\rd", 0x1C);
+        // Four letters as Unicode pairs and three line breaks as Returns.
+        assert_eq!(inputs.len(), 4 * 2 + 3 * 2);
+        let returns = typed(&inputs)
+            .into_iter()
+            .filter(|(vk, _, _)| *vk == VK_RETURN)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            returns,
+            [
+                (VK_RETURN, 0x1C, 0),
+                (VK_RETURN, 0x1C, KEYEVENTF_KEYUP),
+                (VK_RETURN, 0x1C, 0),
+                (VK_RETURN, 0x1C, KEYEVENTF_KEYUP),
+                (VK_RETURN, 0x1C, 0),
+                (VK_RETURN, 0x1C, KEYEVENTF_KEYUP),
+            ]
+        );
+    }
+
+    #[test]
+    fn typing_splits_surrogate_pairs_into_two_unicode_units() {
+        // U+1F600 as the UTF-16 surrogate pair Hex sends.
+        assert_eq!(
+            typed(&typing_inputs("😀", 0x1C)),
+            [
+                (0, 0xD83D, KEYEVENTF_UNICODE),
+                (0, 0xD83D, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+                (0, 0xDE00, KEYEVENTF_UNICODE),
+                (0, 0xDE00, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+            ]
+        );
     }
 
     #[test]

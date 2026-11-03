@@ -62,6 +62,9 @@ pub struct LabsSettings {
     pub picker_downloaded: bool,
     /// The ISO § key may be a shortcut on its own (Linux, issue 1050).
     pub section_key_alone: bool,
+    /// A finished dictation is typed key by key instead of pasted through
+    /// the clipboard, leaving the clipboard untouched.
+    pub type_instead_of_paste: bool,
     /// Dictations saved to History keep their audio, for Transcribe again (issue 1032).
     pub keep_recordings: bool,
     pub hide_menu_bar_icon: bool,
@@ -114,6 +117,7 @@ impl Default for LabsSettings {
             model_in_place: false,
             picker_downloaded: false,
             section_key_alone: false,
+            type_instead_of_paste: false,
             keep_recordings: false,
             hide_menu_bar_icon: false,
             movable_meeting_capsules: false,

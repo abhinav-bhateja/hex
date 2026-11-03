@@ -314,6 +314,11 @@ const KEYS: &[Key] = &[
         "Labs: put the dictation on the clipboard instead of pasting it (macOS)",
     ),
     key(
+        "labs.type_instead_of_paste",
+        Kind::Bool,
+        "Labs: type the dictation key by key instead of pasting it, leaving the clipboard untouched",
+    ),
+    key(
         "labs.spoken_formatting",
         Kind::Bool,
         "Labs: turn spoken \"new line\", \"new paragraph\", and \"open/close quote\" into line breaks and quotation marks",

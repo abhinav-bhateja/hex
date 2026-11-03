@@ -17,7 +17,7 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::linux::clipboard::{Selection, Snapshot};
 use crate::linux::input::{
-    KEY_PRESS, KEY_RELEASE, ShortcutKeys, XK_CONTROL_L, XK_SHIFT_L, connect_x11,
+    KEY_PRESS, KEY_RELEASE, Keymap, ShortcutKeys, XK_CONTROL_L, XK_SHIFT_L, connect_x11,
 };
 use crate::linux::remote_desktop::RemoteDesktop;
 use crate::linux::session::LinuxSession;
@@ -178,6 +178,34 @@ impl WaylandKeys {
             }
         }
     }
+
+    /// Types `text` with `wtype`, never touching the clipboard. The
+    /// RemoteDesktop portal has no typing path, so without `wtype` and a
+    /// compositor offering the virtual keyboard protocol this fails and the
+    /// caller pastes instead.
+    fn type_text(&mut self, stop: &AtomicBool, text: &str) -> Result<()> {
+        if matches!(self, Self::Unchosen) {
+            if wtype_pastes() {
+                *self = Self::Wtype;
+            } else {
+                return Err(eyre!(
+                    "typing needs wtype with a compositor offering the virtual keyboard protocol"
+                ));
+            }
+        }
+        match self {
+            Self::Unchosen => unreachable!("chosen above"),
+            Self::Wtype => {
+                let mut type_command = Command::new("wtype");
+                type_command.args(typing_args(text));
+                run_helper(type_command, &[], stop, HELPER_TIMEOUT)
+                    .wrap_err("wtype could not type the text")
+            }
+            Self::Portal(_) => Err(eyre!(
+                "typing needs wtype with a compositor offering the virtual keyboard protocol; the RemoteDesktop portal only sends the paste shortcut"
+            )),
+        }
+    }
 }
 
 /// Whether this session pastes through the desktop's RemoteDesktop portal,
@@ -319,6 +347,27 @@ impl LinuxPaster {
     /// Pastes through the clipboard, then puts the previous clipboard back
     /// unless something newer replaced the paste first.
     fn paste_as(&mut self, mime: Mime, bytes: &[u8]) -> Result<()> {
+        // Labs › Type instead of pasting: keystrokes instead of the
+        // clipboard, so there is nothing to snapshot or restore afterwards.
+        // A capture's contact sheet still pastes. When typing fails, the
+        // dictation pastes instead, so no words are lost.
+        if matches!(mime, Mime::Text) && crate::labs::type_instead_of_paste() {
+            let typed = std::str::from_utf8(bytes)
+                .map_err(|error| eyre!(error))
+                .and_then(|text| self.send_typing(text));
+            match typed {
+                Ok(()) => {
+                    thread::sleep(PASTE_SETTLE);
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = format!("{error:#}"),
+                        "typing the dictation failed; pasting instead"
+                    );
+                }
+            }
+        }
         let restore = self.restore.clone();
         let selection = self.selection.current();
         let mut state = restore.lock().unwrap_or_else(PoisonError::into_inner);
@@ -375,6 +424,18 @@ impl LinuxPaster {
             }
         }
         Ok(())
+    }
+
+    fn send_typing(&mut self, text: &str) -> Result<()> {
+        // Held keys would join the typed text (a held Ctrl turns letters
+        // into shortcuts), so they settle first, as pastes do.
+        match &mut self.backend {
+            Backend::X11(paster) => paster.type_text(text, &self.stop, &self.keys),
+            Backend::Wayland(wayland) => {
+                self.keys.settle(&self.stop)?;
+                wayland.type_text(&self.stop, text)
+            }
+        }
     }
 }
 
@@ -498,6 +559,44 @@ impl X11Paster {
             },
         )
     }
+
+    /// Types `text` with XTEST key events, never touching the clipboard.
+    /// Every key is resolved before any is sent, so an untypable character
+    /// fails the whole typing (and the caller pastes instead) rather than
+    /// leaving half the dictation typed.
+    fn type_text(&mut self, text: &str, stop: &AtomicBool, keys: &ShortcutKeys) -> Result<()> {
+        let keymap = Keymap::read(&self.connection)
+            .wrap_err("could not read the active X11 keymap for typing")?;
+        let shift = keymap
+            .keycode(XK_SHIFT_L)
+            .wrap_err("could not read the active X11 keymap for typing")?;
+        let mut strokes = Vec::new();
+        let mut characters = text.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == '\r' {
+                characters.next_if_eq(&'\n');
+            }
+            let keysym = typing_keysym(character)?;
+            strokes.push(keymap.typing_key(keysym)?);
+        }
+        self.wait_for_modifier_release(stop, keys)?;
+        for (keycode, with_shift) in strokes {
+            if with_shift {
+                xtest::fake_input(&self.connection, KEY_PRESS, shift, 0, self.root, 0, 0, 0)?
+                    .check()?;
+            }
+            xtest::fake_input(&self.connection, KEY_PRESS, keycode, 0, self.root, 0, 0, 0)?
+                .check()?;
+            xtest::fake_input(&self.connection, KEY_RELEASE, keycode, 0, self.root, 0, 0, 0)?
+                .check()?;
+            if with_shift {
+                xtest::fake_input(&self.connection, KEY_RELEASE, shift, 0, self.root, 0, 0, 0)?
+                    .check()?;
+            }
+        }
+        self.connection.flush()?;
+        Ok(())
+    }
 }
 
 /// The evdev code of the V key (`KEY_V`).
@@ -525,6 +624,39 @@ fn paste_keys(with_shift: bool) -> Vec<String> {
     // neutral VoidSymbol release so its shortcut remains discoverable (#28).
     keys.extend(["-p".to_owned(), "VoidSymbol".to_owned()]);
     keys
+}
+
+/// `wtype` arguments that type `text`: each line as one text argument with
+/// `-k Return` between lines, after `--` so a leading `-` stays text.
+/// Pure, so tests cover it without a compositor.
+fn typing_args(text: &str) -> Vec<String> {
+    let mut args = vec!["--".to_owned()];
+    let mut lines = text.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if !line.is_empty() {
+            args.push(line.to_owned());
+        }
+        if lines.peek().is_some() {
+            args.extend(["-k".to_owned(), "Return".to_owned()]);
+        }
+    }
+    args
+}
+
+/// The X11 keysym that types `character`: Return for line breaks, the
+/// character itself for printable Latin-1. Anything else (tabs, emoji, CJK)
+/// has no typing path, so the whole typing fails and the caller pastes
+/// instead. Pure, so tests cover it without a display.
+fn typing_keysym(character: char) -> Result<u32> {
+    const XK_RETURN: u32 = 0xff0d;
+    match character {
+        '\r' | '\n' => Ok(XK_RETURN),
+        character if !character.is_control() && u32::from(character) <= 0xFF => {
+            Ok(u32::from(character))
+        }
+        _ => Err(eyre!("no X11 typing key for {character:?}")),
+    }
 }
 
 /// Waits until the X server reports no held modifiers. While one of Hex's
@@ -675,6 +807,38 @@ mod tests {
                 "VoidSymbol"
             ]
         );
+    }
+
+    #[test]
+    fn typing_args_type_each_line_with_return_between_them() {
+        let owned =
+            |args: &[&str]| args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        assert_eq!(typing_args("hello"), owned(&["--", "hello"]));
+        assert_eq!(
+            typing_args("one\ntwo\r\nthree\n"),
+            owned(&[
+                "--", "one", "-k", "Return", "two", "-k", "Return", "three", "-k", "Return"
+            ])
+        );
+        assert_eq!(typing_args(""), owned(&["--"]));
+        // A leading `-` stays text after `--`, and blank lines type Return.
+        assert_eq!(
+            typing_args("-item\n\nnext"),
+            owned(&["--", "-item", "-k", "Return", "-k", "Return", "next"])
+        );
+    }
+
+    #[test]
+    fn typing_keysyms_cover_latin_1_and_line_breaks() {
+        assert_eq!(typing_keysym('a').unwrap(), 0x61);
+        assert_eq!(typing_keysym('A').unwrap(), 0x41);
+        assert_eq!(typing_keysym(' ').unwrap(), 0x20);
+        assert_eq!(typing_keysym('é').unwrap(), 0xE9);
+        assert_eq!(typing_keysym('\n').unwrap(), 0xff0d);
+        assert_eq!(typing_keysym('\r').unwrap(), 0xff0d);
+        for untypable in ['\t', '€', '漢', '😀'] {
+            assert!(typing_keysym(untypable).is_err(), "{untypable:?}");
+        }
     }
 
     /// wtype gives each new keysym the next evdev code from 1, in argument

@@ -1397,6 +1397,8 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("In the background", ["W tle", "在后台", "バックグラウンド", "Im Hintergrund", "En segundo plano", "У фоні"]),
     ("Dictation indicator", ["Wskaźnik dyktowania", "听写指示器", "音声入力インジケーター", "Diktatanzeige", "Indicador de dictado", "Індикатор диктування"]),
     ("Record your screen, draw on it, and talk over it with a shortcut", ["Nagrywaj ekran, rysuj na nim i komentuj go głosem za pomocą skrótu", "用快捷键录制屏幕、在上面绘制并配上讲解", "ショートカットで画面を録画し、描き込みながら話せます", "Bildschirm per Kürzel aufnehmen, darauf zeichnen und dazu sprechen", "Graba tu pantalla, dibuja sobre ella y coméntala con un atajo", "Записуйте екран, малюйте на ньому й коментуйте голосом за допомогою комбінації"]),
+    ("Type instead of pasting", ["Pisz zamiast wklejać", "逐字输入而不粘贴", "貼り付けの代わりに入力する", "Statt einzufügen tippen", "Escribir en lugar de pegar", "Друкувати замість вставляння"]),
+    ("Type the dictation key by key instead of pasting it, leaving the clipboard untouched", ["Wpisuje dyktowanie klawisz po klawiszu zamiast je wklejać, nie zmieniając schowka", "将听写内容逐字输入而不是粘贴，保持剪贴板不变", "音声入力を貼り付けずに一文字ずつ入力し、クリップボードはそのままにします", "Tippt das Diktat Taste für Taste statt es einzufügen; die Zwischenablage bleibt unberührt", "Escribe el dictado tecla por tecla en lugar de pegarlo, sin tocar el portapapeles", "Друкує диктування клавіша за клавішею замість вставляння, не чіпаючи буфер обміну"]),
 ];
 
 #[cfg(test)]

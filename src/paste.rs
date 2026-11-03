@@ -244,7 +244,22 @@ impl Paster {
             None if crate::labs::smart_spacing() => with_smart_spacing(text),
             None => text.to_string(),
         };
-        if crate::dictation::context::frontmost_bundle_path()
+        if crate::labs::type_instead_of_paste() {
+            commit_prepared_paste(
+                || Ok(()),
+                commit,
+                |()| {
+                    if matches!(mode, PasteMode::Standalone) {
+                        self.continuation = None;
+                    }
+                    tracing::debug!(
+                        "typing instead of pasting: Labs › Type instead of pasting is on"
+                    );
+                    keyboard::type_text(&text)?;
+                    Ok(())
+                },
+            )?;
+        } else if crate::dictation::context::frontmost_bundle_path()
             .is_some_and(|bundle| has_clipboard_race(&bundle))
         {
             commit_prepared_paste(

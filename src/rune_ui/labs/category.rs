@@ -105,6 +105,7 @@ impl Category {
             | Feature::ShareShortcut => Self::Shortcuts,
             Feature::KeepOnClipboard
             | Feature::CopyOnly
+            | Feature::TypeInsteadOfPaste
             | Feature::RecentDictations
             | Feature::GnomeClipboardRestore
             | Feature::TerminalPaste => Self::Clipboard,
@@ -159,6 +160,7 @@ impl Place {
             | Feature::FillerWords
             | Feature::KeepOnClipboard
             | Feature::CopyOnly
+            | Feature::TypeInsteadOfPaste
             | Feature::SkipPauses
             | Feature::VocabularyBiasing
             | Feature::GnomeClipboardRestore

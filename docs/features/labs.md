@@ -34,6 +34,7 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 ├── Restore shortcut default no labs.restore_shortcut_default   Paste last dictation's row offers its default back (#613)
 ├── Keep dictation on clipboard no labs.keep_on_clipboard (macOS) a pasted dictation stays on the clipboard; the previous one is not restored (#200)
 ├── Copy dictation only no labs.copy_only (macOS)    a dictation goes to the clipboard and is never pasted; Paste last dictation still pastes (#629)
+├── Type instead of pasting no labs.type_instead_of_paste  a finished dictation is typed key by key instead of pasted, leaving the clipboard untouched
 ├── Spoken formatting no labs.spoken_formatting      spoken "new line"/"line break", "new paragraph", "open/close quote", "quote … unquote" become line breaks and quotation marks; Spanish "nuevo párrafo", "nueva línea", "abre/cierra comillas", … too (#630, #1040)
 ├── Spoken symbols  no    labs.spoken_symbols          spoken "hashtag", "underscore", "comma", … become symbols joined to their words: "#release", "my_variable", "done, thanks"; Spanish "arroba", "guion bajo", "coma", … too (#678, #1040)
 ├── Remove filler words no labs.filler_words          um, umm, uh, uhh, erm, er, ah leave dictations, with no model (#631)
@@ -215,6 +216,42 @@ exactly as before. Checks:
 `contributed_options_are_labs_toggles_off_by_default` in
 [panes.rs](../../src/rune_ui/tests/panes.rs). Not yet observed: a real
 dictation on a Mac with the toggle on.
+
+Type instead of pasting (`type-instead-of-paste`, every OS): while on, a
+finished dictation (the dictation shortcut, Dictate without processing, Paste
+last dictation, and meeting turns where the platform pastes them) is typed key
+by key into the focused app
+instead of going through the clipboard. Each paste path
+(`paste::Paster::paste_text` on macOS,
+`WindowsPaster::paste`, `LinuxPaster::paste_as`) reads
+`labs::type_instead_of_paste()` as it commits: it sends keystrokes and never
+snapshots, writes, or restores the clipboard, so Labs › Keep dictation on
+clipboard has nothing to keep and Terminal paste has no shortcut to send.
+Labs › Copy dictation only still wins, leaving the text on the clipboard with
+no insertion at all, and a capture's contact sheet still pastes. Continuation
+joins and Labs › Smart spacing still shape the typed text on macOS, where
+typing is the existing `keyboard::type_text` (line breaks as Shift-Return);
+Windows sends UTF-16 units through `KEYEVENTF_UNICODE` with Return for line
+breaks; Linux types through `wtype` on Wayland and XTEST keysyms (printable
+Latin-1, Shift for the second level) on X11. On Linux a dictation with a
+character the active keymap cannot type, or a failed typing run, pastes
+through the clipboard instead with a warning in process.log, so no words are
+lost. Off, insertion is exactly as before. Checks:
+`type_instead_of_paste_is_its_own_bit_and_off_by_default` in
+[labs.rs](../../src/labs.rs);
+`contributed_options_are_labs_toggles_off_by_default` in
+[panes.rs](../../src/rune_ui/tests/panes.rs);
+`typing_sends_each_unit_as_unicode_down_then_up`,
+`typing_sends_each_line_break_as_one_return`, and
+`typing_splits_surrogate_pairs_into_two_unicode_units` in
+[windows/paste.rs](../../src/windows/paste.rs);
+`typing_args_type_each_line_with_return_between_them` and
+`typing_keysyms_cover_latin_1_and_line_breaks` in
+[linux/paste.rs](../../src/linux/paste.rs); and
+`typing_keys_come_from_the_first_two_levels_only` in
+[linux/input/x11.rs](../../src/linux/input/x11.rs). Not yet observed: a real
+dictation with the toggle on on any OS; the Labs page goldens need
+regenerating on Linux with the new row.
 
 Spoken formatting (`spoken-formatting`, issue 630, every OS): while on,
 `Profiles::process_cancellable` in

@@ -719,6 +719,27 @@ impl Keymap {
             .ok_or_else(|| eyre!("active X11 keymap has no key for keysym {keysym:#x}"))
     }
 
+    /// The keycode and whether Shift types `keysym`: the first level types
+    /// as is, the second with Shift held. Deeper levels (AltGr and beyond)
+    /// have no typing path.
+    pub(crate) fn typing_key(&self, keysym: u32) -> Result<(u8, bool)> {
+        self.symbols
+            .chunks(self.symbols_per_keycode)
+            .enumerate()
+            .find_map(|(index, symbols)| {
+                symbols
+                    .iter()
+                    .position(|symbol| *symbol == keysym)
+                    .map(|level| (self.min + index as u8, level))
+            })
+            .and_then(|(keycode, level)| match level {
+                0 => Some((keycode, false)),
+                1 => Some((keycode, true)),
+                _ => None,
+            })
+            .ok_or_else(|| eyre!("active X11 keymap has no typing key for keysym {keysym:#x}"))
+    }
+
     pub(crate) fn modifier_for(
         &self,
         connection: &RustConnection,
@@ -736,5 +757,35 @@ impl Keymap {
             .position(|codes| codes.iter().any(|code| keycodes.contains(code)))
             .map(|index| ModMask::from(1_u16 << index))
             .ok_or_else(|| eyre!("active X11 keymap does not map the requested modifier"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A two-key fragment: keycode 8 types `a` unshifted and `A` shifted,
+    /// keycode 9 types Return alone, and keycode 10 types the euro sign only
+    /// with AltGr (level 2), which has no typing path.
+    fn fragment() -> Keymap {
+        Keymap {
+            min: 8,
+            symbols_per_keycode: 4,
+            symbols: vec![
+                0x61, 0x41, 0, 0, //
+                0xff0d, 0, 0, 0, //
+                0, 0, 0x20ac, 0, //
+            ],
+        }
+    }
+
+    #[test]
+    fn typing_keys_come_from_the_first_two_levels_only() {
+        let keymap = fragment();
+        assert_eq!(keymap.typing_key(0x61).unwrap(), (8, false));
+        assert_eq!(keymap.typing_key(0x41).unwrap(), (8, true));
+        assert_eq!(keymap.typing_key(0xff0d).unwrap(), (9, false));
+        assert!(keymap.typing_key(0x20ac).is_err());
+        assert!(keymap.typing_key(0x62).is_err());
     }
 }

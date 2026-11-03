@@ -567,6 +567,12 @@ fn rows(ui: &Ui) -> Vec<Row> {
         tr("Remove filler words such as um and uh from dictations, without an AI model"),
     ));
     rows.push(row(
+        Feature::TypeInsteadOfPaste,
+        None,
+        tr("Type instead of pasting"),
+        tr("Type the dictation key by key instead of pasting it, leaving the clipboard untouched"),
+    ));
+    rows.push(row(
         Feature::HistoryStats,
         None,
         tr("Dictation stats"),
@@ -718,6 +724,7 @@ fn row_key(lab: Lab) -> &'static str {
         Feature::MeetingNotesVocabulary => "lab-meeting-notes-vocabulary",
         Feature::NotchIndicator => "lab-notch-indicator",
         Feature::MeetingFinishedEvent => "lab-meeting-finished-event",
+        Feature::TypeInsteadOfPaste => "lab-type-instead-of-paste",
     }
 }
 

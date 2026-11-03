@@ -8,8 +8,9 @@
 //! last dictation's default shortcut, keeping the dictation on the
 //! clipboard or only copying it (macOS), a second dictation shortcut
 //! (macOS), Toggle's tap or hold (macOS, Linux), stopping an automatic meeting
-//! recording when its call ends (macOS), and Terminal paste
-//! and shortcut sharing on Windows) is just its toggle.
+//! recording when its call ends (macOS), Terminal paste
+//! and shortcut sharing on Windows, and typing a finished dictation instead
+//! of pasting it) is just its toggle.
 //!
 //! Each feature has an audience (`Feature::audience`): `Everyone` ships in
 //! every build; `Dev` exists only in dev builds (`dev_build::is_dev_build`:
@@ -103,10 +104,11 @@ pub enum Feature {
     MeetingNotesVocabulary,
     NotchIndicator,
     MeetingFinishedEvent,
+    TypeInsteadOfPaste,
 }
 
 impl Feature {
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 45] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -151,6 +153,7 @@ impl Feature {
         Self::MeetingNotesVocabulary,
         Self::NotchIndicator,
         Self::MeetingFinishedEvent,
+        Self::TypeInsteadOfPaste,
     ];
 
     /// The features this OS and build have.
@@ -217,7 +220,8 @@ impl Feature {
             | Self::GnomeClipboardRestore
             | Self::MeetingNotesVocabulary
             | Self::MeetingFinishedEvent
-            | Self::NotchIndicator => Audience::Everyone,
+            | Self::NotchIndicator
+            | Self::TypeInsteadOfPaste => Audience::Everyone,
         }
     }
 
@@ -266,7 +270,8 @@ impl Feature {
             | Self::MeetingSummaryModel
             | Self::GnomeClipboardRestore
             | Self::MeetingNotesVocabulary
-            | Self::NotchIndicator => 20261103,
+            | Self::NotchIndicator
+            | Self::TypeInsteadOfPaste => 20261103,
             Self::MeetingFinishedEvent => 20261104,
         }
     }
@@ -338,6 +343,7 @@ impl Feature {
             | Self::MeetingSummaryModel
             | Self::MeetingNotesVocabulary
             | Self::MeetingFinishedEvent
+            | Self::TypeInsteadOfPaste
             | Self::FillerWords => true,
         }
     }
@@ -389,6 +395,7 @@ impl Feature {
             Self::MeetingNotesVocabulary => "meeting-notes-vocabulary",
             Self::NotchIndicator => "notch-indicator",
             Self::MeetingFinishedEvent => "meeting-finished-event",
+            Self::TypeInsteadOfPaste => "type-instead-of-paste",
         }
     }
 
@@ -439,6 +446,7 @@ impl Feature {
             Self::MeetingNotesVocabulary => "labs.meeting_notes_vocabulary",
             Self::NotchIndicator => "labs.notch_indicator",
             Self::MeetingFinishedEvent => "labs.meeting_finished_event",
+            Self::TypeInsteadOfPaste => "labs.type_instead_of_paste",
         }
     }
 
@@ -559,6 +567,9 @@ impl Feature {
             Self::MeetingFinishedEvent => {
                 "Tell apps on this computer when a meeting's transcript is ready, through the local API's GET /meetings/events (the meeting's id only)"
             }
+            Self::TypeInsteadOfPaste => {
+                "Type a finished dictation key by key instead of pasting it, leaving the clipboard untouched"
+            }
         }
     }
 
@@ -613,6 +624,7 @@ impl Feature {
             Self::MeetingNotesVocabulary => settings.labs.meeting_notes_vocabulary,
             Self::NotchIndicator => settings.labs.notch_indicator,
             Self::MeetingFinishedEvent => settings.labs.meeting_finished_event,
+            Self::TypeInsteadOfPaste => settings.labs.type_instead_of_paste,
         }
     }
 
@@ -665,6 +677,7 @@ impl Feature {
             &mut labs.meeting_notes_vocabulary,
             &mut labs.notch_indicator,
             &mut labs.meeting_finished_event,
+            &mut labs.type_instead_of_paste,
         ]
     }
 
@@ -717,6 +730,7 @@ impl Feature {
             Self::MeetingNotesVocabulary => settings.labs.meeting_notes_vocabulary = on,
             Self::NotchIndicator => settings.labs.notch_indicator = on,
             Self::MeetingFinishedEvent => settings.labs.meeting_finished_event = on,
+            Self::TypeInsteadOfPaste => settings.labs.type_instead_of_paste = on,
             // Off, no shortcut keeps a key only the feature allows.
             Self::StandaloneSpecialKeys => {
                 settings.labs.standalone_special_keys = on;
@@ -760,6 +774,7 @@ const GNOME_CLIPBOARD_RESTORE: u64 = 1 << 25;
 const MEETING_NOTES_VOCABULARY: u64 = 1 << 26;
 const NOTCH_INDICATOR: u64 = 1 << 27;
 const MEETING_FINISHED_EVENT: u64 = 1 << 28;
+const TYPE_INSTEAD_OF_PASTE: u64 = 1 << 29;
 /// Unload-idle minutes (at most 1,440, 11 bits) sit above the switches.
 const MINUTES_SHIFT: u64 = 32;
 
@@ -959,6 +974,12 @@ pub fn meeting_finished_event() -> bool {
     on(MEETING_FINISHED_EVENT) && Feature::MeetingFinishedEvent.on_this_os()
 }
 
+/// A finished dictation is typed key by key instead of pasted through the
+/// clipboard, leaving the clipboard untouched (read as each paste commits).
+pub fn type_instead_of_paste() -> bool {
+    on(TYPE_INSTEAD_OF_PASTE)
+}
+
 /// How long the speech model may sit unused before the engine unloads it,
 /// while Labs › Unload model when idle is on.
 pub fn unload_idle() -> Option<std::time::Duration> {
@@ -1083,6 +1104,11 @@ fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u
             Feature::MeetingFinishedEvent,
             settings.meeting_finished_event,
             MEETING_FINISHED_EVENT,
+        ),
+        (
+            Feature::TypeInsteadOfPaste,
+            settings.type_instead_of_paste,
+            TYPE_INSTEAD_OF_PASTE,
         ),
     ]
     .into_iter()
@@ -1553,6 +1579,18 @@ mod tests {
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & MEETING_FINISHED_EVENT, 0);
         assert_eq!(state & NOTCH_INDICATOR, 0);
+        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
+    }
+
+    #[test]
+    fn type_instead_of_paste_is_its_own_bit_and_off_by_default() {
+        let mut labs = LabsSettings::default();
+        assert_eq!(encode_where(&labs, |_| true) & TYPE_INSTEAD_OF_PASTE, 0);
+        labs.type_instead_of_paste = true;
+        labs.unload_idle_minutes = 24 * 60;
+        let state = encode_where(&labs, |_| true);
+        assert_ne!(state & TYPE_INSTEAD_OF_PASTE, 0);
+        assert_eq!(state & MOVABLE_MEETING_CAPSULES, 0);
         assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
