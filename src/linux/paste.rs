@@ -2,6 +2,7 @@ use std::io::{ErrorKind, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -195,12 +196,7 @@ impl WaylandKeys {
         }
         match self {
             Self::Unchosen => unreachable!("chosen above"),
-            Self::Wtype => {
-                let mut type_command = Command::new("wtype");
-                type_command.args(typing_args(text));
-                run_helper(type_command, &[], stop, HELPER_TIMEOUT)
-                    .wrap_err("wtype could not type the text")
-            }
+            Self::Wtype => type_with_wtype(Path::new("wtype"), stop, text),
             Self::Portal(_) => Err(eyre!(
                 "typing needs wtype with a compositor offering the virtual keyboard protocol; the RemoteDesktop portal only sends the paste shortcut"
             )),
@@ -548,16 +544,25 @@ impl X11Paster {
             stop,
             MODIFIER_WAIT_LIMIT,
             || keys.any_held(),
-            || {
-                let mask = self.connection.query_pointer(self.root)?.reply()?.mask;
-                let held = mask
-                    & (KeyButMask::SHIFT
-                        | KeyButMask::CONTROL
-                        | KeyButMask::MOD1
-                        | KeyButMask::MOD4);
-                Ok(held != KeyButMask::default())
-            },
+            || self.modifiers_held(),
         )
+    }
+
+    /// Whether Shift, Ctrl, Alt, or a Super key is down. Typing must wait for
+    /// every one of them: unlike Ctrl+V, a held modifier would join each
+    /// typed key and turn it into a shortcut.
+    fn modifiers_held(&self) -> Result<bool> {
+        let mask = self.connection.query_pointer(self.root)?.reply()?.mask;
+        let held =
+            mask & (KeyButMask::SHIFT | KeyButMask::CONTROL | KeyButMask::MOD1 | KeyButMask::MOD4);
+        Ok(held != KeyButMask::default())
+    }
+
+    /// Whether Caps Lock is on. A locked alphabetic key types the opposite
+    /// case, so typing falls back to the clipboard rather than mistype.
+    fn caps_lock_on(&self) -> Result<bool> {
+        let mask = self.connection.query_pointer(self.root)?.reply()?.mask;
+        Ok(mask.contains(KeyButMask::LOCK))
     }
 
     /// Types `text` with XTEST key events, never touching the clipboard.
@@ -576,10 +581,21 @@ impl X11Paster {
             if character == '\r' {
                 characters.next_if_eq(&'\n');
             }
-            let keysym = typing_keysym(character)?;
-            strokes.push(keymap.typing_key(keysym)?);
+            let (keysym, shift_for_stroke) = typing_keysym(character)?;
+            let (keycode, second_level) = keymap.typing_key(keysym)?;
+            strokes.push((keycode, shift_for_stroke || second_level));
         }
         self.wait_for_modifier_release(stop, keys)?;
+        if self.modifiers_held()? {
+            return Err(eyre!(
+                "modifiers are still held; pasting instead of typing with them"
+            ));
+        }
+        if self.caps_lock_on()? {
+            return Err(eyre!(
+                "Caps Lock is on; pasting instead of mistyping the case"
+            ));
+        }
         for (keycode, with_shift) in strokes {
             if with_shift {
                 xtest::fake_input(&self.connection, KEY_PRESS, shift, 0, self.root, 0, 0, 0)?
@@ -587,8 +603,17 @@ impl X11Paster {
             }
             xtest::fake_input(&self.connection, KEY_PRESS, keycode, 0, self.root, 0, 0, 0)?
                 .check()?;
-            xtest::fake_input(&self.connection, KEY_RELEASE, keycode, 0, self.root, 0, 0, 0)?
-                .check()?;
+            xtest::fake_input(
+                &self.connection,
+                KEY_RELEASE,
+                keycode,
+                0,
+                self.root,
+                0,
+                0,
+                0,
+            )?
+            .check()?;
             if with_shift {
                 xtest::fake_input(&self.connection, KEY_RELEASE, shift, 0, self.root, 0, 0, 0)?
                     .check()?;
@@ -626,34 +651,74 @@ fn paste_keys(with_shift: bool) -> Vec<String> {
     keys
 }
 
-/// `wtype` arguments that type `text`: each line as one text argument with
-/// `-k Return` between lines, after `--` so a leading `-` stays text.
-/// Pure, so tests cover it without a compositor.
-fn typing_args(text: &str) -> Vec<String> {
-    let mut args = vec!["--".to_owned()];
-    let mut lines = text.split('\n').peekable();
-    while let Some(line) = lines.next() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if !line.is_empty() {
-            args.push(line.to_owned());
-        }
-        if lines.peek().is_some() {
-            args.extend(["-k".to_owned(), "Return".to_owned()]);
-        }
-    }
-    args
+/// One piece of a dictation typed through `wtype`.
+#[derive(Debug, PartialEq, Eq)]
+enum TypingStep<'a> {
+    /// Text for `wtype -`, which reads it from stdin and never from argv.
+    Text(&'a str),
+    /// One Shift-Return, so chat boxes insert a newline instead of sending.
+    LineBreak,
 }
 
-/// The X11 keysym that types `character`: Return for line breaks, the
-/// character itself for printable Latin-1. Anything else (tabs, emoji, CJK)
-/// has no typing path, so the whole typing fails and the caller pastes
-/// instead. Pure, so tests cover it without a display.
-fn typing_keysym(character: char) -> Result<u32> {
+/// Splits `text` into `wtype` steps: each line's text goes through stdin,
+/// and every line break is one Shift-Return. `\r\n`, `\n`, and `\r` each
+/// become one line break. Pure, so tests cover it without a compositor.
+fn typing_steps(text: &str) -> Vec<TypingStep<'_>> {
+    let mut steps = Vec::new();
+    let mut start = 0;
+    let mut characters = text.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        if !matches!(character, '\r' | '\n') {
+            continue;
+        }
+        if index > start {
+            steps.push(TypingStep::Text(&text[start..index]));
+        }
+        if character == '\r' {
+            characters.next_if(|(_, next)| *next == '\n');
+        }
+        steps.push(TypingStep::LineBreak);
+        start = characters.peek().map_or(text.len(), |(index, _)| *index);
+    }
+    if start < text.len() {
+        steps.push(TypingStep::Text(&text[start..]));
+    }
+    steps
+}
+
+/// Types `text` through `wtype`: text travels on stdin, never in argv, and
+/// line breaks are Shift-Return. `program` is a path or a name resolved
+/// through `PATH`; tests pass a script to inspect both streams.
+fn type_with_wtype(program: &Path, stop: &AtomicBool, text: &str) -> Result<()> {
+    for step in typing_steps(text) {
+        let mut command = Command::new(program);
+        match step {
+            TypingStep::Text(text) => {
+                command.arg("-");
+                run_helper(command, text.as_bytes(), stop, HELPER_TIMEOUT)
+                    .wrap_err("wtype could not type the text")?;
+            }
+            TypingStep::LineBreak => {
+                command.args(["-M", "shift", "-k", "Return", "-m", "shift"]);
+                run_helper(command, &[], stop, HELPER_TIMEOUT)
+                    .wrap_err("wtype could not type a line break")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The X11 keysym and whether Shift types `character`: Shift-Return for line
+/// breaks (so chat boxes insert a newline instead of sending), the character
+/// itself for printable Latin-1. Anything else (tabs, emoji, CJK) has no
+/// typing path, so the whole typing fails and the caller pastes instead.
+/// Pure, so tests cover it without a display.
+fn typing_keysym(character: char) -> Result<(u32, bool)> {
     const XK_RETURN: u32 = 0xff0d;
     match character {
-        '\r' | '\n' => Ok(XK_RETURN),
+        '\r' | '\n' => Ok((XK_RETURN, true)),
         character if !character.is_control() && u32::from(character) <= 0xFF => {
-            Ok(u32::from(character))
+            Ok((u32::from(character), false))
         }
         _ => Err(eyre!("no X11 typing key for {character:?}")),
     }
@@ -810,32 +875,86 @@ mod tests {
     }
 
     #[test]
-    fn typing_args_type_each_line_with_return_between_them() {
-        let owned =
-            |args: &[&str]| args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-        assert_eq!(typing_args("hello"), owned(&["--", "hello"]));
+    fn typing_steps_keep_text_off_argv_and_line_breaks_as_shift_return() {
+        assert_eq!(typing_steps("hello"), [TypingStep::Text("hello")]);
         assert_eq!(
-            typing_args("one\ntwo\r\nthree\n"),
-            owned(&[
-                "--", "one", "-k", "Return", "two", "-k", "Return", "three", "-k", "Return"
-            ])
+            typing_steps("one\ntwo\r\nthree\n"),
+            [
+                TypingStep::Text("one"),
+                TypingStep::LineBreak,
+                TypingStep::Text("two"),
+                TypingStep::LineBreak,
+                TypingStep::Text("three"),
+                TypingStep::LineBreak,
+            ]
         );
-        assert_eq!(typing_args(""), owned(&["--"]));
-        // A leading `-` stays text after `--`, and blank lines type Return.
+        assert!(typing_steps("").is_empty());
+        // A leading `-` stays text through stdin, and blank lines type Return.
         assert_eq!(
-            typing_args("-item\n\nnext"),
-            owned(&["--", "-item", "-k", "Return", "-k", "Return", "next"])
+            typing_steps("-item\n\nnext"),
+            [
+                TypingStep::Text("-item"),
+                TypingStep::LineBreak,
+                TypingStep::LineBreak,
+                TypingStep::Text("next"),
+            ]
+        );
+        // A lone carriage return is one line break, not text.
+        assert_eq!(
+            typing_steps("one\rtwo"),
+            [
+                TypingStep::Text("one"),
+                TypingStep::LineBreak,
+                TypingStep::Text("two"),
+            ]
         );
     }
 
     #[test]
+    fn wtype_types_text_from_stdin_and_line_breaks_as_shift_return() {
+        let directory = std::env::temp_dir().join(format!("hex-wtype-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let args_path = directory.join("args");
+        let stdin_path = directory.join("stdin");
+        let script_path = directory.join("wtype");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\ntext=$(cat)\n\
+                 [ -z \"$text\" ] || {{ printf '%s' \"$text\" >> '{}'; printf '\\036' >> '{}'; }}\n",
+                args_path.display(),
+                stdin_path.display(),
+                stdin_path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        type_with_wtype(&script_path, &AtomicBool::new(false), "one\n- two\r\nthree").unwrap();
+
+        let args = std::fs::read_to_string(&args_path).unwrap();
+        assert_eq!(
+            args,
+            "-\n-M\nshift\n-k\nReturn\n-m\nshift\n-\n-M\nshift\n-k\nReturn\n-m\nshift\n-\n"
+        );
+        assert!(!args.contains("one"), "text must never reach argv: {args}");
+        assert_eq!(
+            std::fs::read(&stdin_path).unwrap(),
+            b"one\x1e- two\x1ethree\x1e"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn typing_keysyms_cover_latin_1_and_line_breaks() {
-        assert_eq!(typing_keysym('a').unwrap(), 0x61);
-        assert_eq!(typing_keysym('A').unwrap(), 0x41);
-        assert_eq!(typing_keysym(' ').unwrap(), 0x20);
-        assert_eq!(typing_keysym('é').unwrap(), 0xE9);
-        assert_eq!(typing_keysym('\n').unwrap(), 0xff0d);
-        assert_eq!(typing_keysym('\r').unwrap(), 0xff0d);
+        assert_eq!(typing_keysym('a').unwrap(), (0x61, false));
+        assert_eq!(typing_keysym('A').unwrap(), (0x41, false));
+        assert_eq!(typing_keysym(' ').unwrap(), (0x20, false));
+        assert_eq!(typing_keysym('é').unwrap(), (0xE9, false));
+        // Line breaks are Shift-Return, never a bare Return.
+        assert_eq!(typing_keysym('\n').unwrap(), (0xff0d, true));
+        assert_eq!(typing_keysym('\r').unwrap(), (0xff0d, true));
         for untypable in ['\t', '€', '漢', '😀'] {
             assert!(typing_keysym(untypable).is_err(), "{untypable:?}");
         }

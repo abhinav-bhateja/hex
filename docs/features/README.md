@@ -696,6 +696,8 @@ Checks in [paste.rs](../../src/paste.rs), [parakeet.rs](../../src/parakeet.rs), 
 They do not prove that an arbitrary target consumed its clipboard contents.
 Send is not an atomic target-app transaction. Chromium 155 and 156 get the text
 typed instead of pasted for a [Chrome paste bug](dictation.md#ongoing-jobs-and-output).
+Labs › Type instead of pasting uses the same kind of synthesized keys on every
+OS and never writes the clipboard; see [labs.md](labs.md).
 
 **Easy to misread:** History Off does not stop diagnostic logging. Diagnostic
 logs are separate and currently unbounded on disk.

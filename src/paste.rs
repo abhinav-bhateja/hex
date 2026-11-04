@@ -188,6 +188,14 @@ impl Paster {
     }
 
     pub fn prepare(&mut self) {
+        // Labs › Type instead of pasting never touches the clipboard, so
+        // there is nothing to snapshot before the dictation. Read here and
+        // again as the paste commits, so turning it off mid-capture still
+        // captures the clipboard at paste time.
+        if crate::labs::type_instead_of_paste() {
+            self.prepared_clipboard = None;
+            return;
+        }
         let change_count = self.clipboard.changeCount();
         if self
             .prepared_clipboard

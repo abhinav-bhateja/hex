@@ -125,7 +125,7 @@ impl WindowsPaster {
         // Labs › Type instead of pasting: keystrokes instead of the
         // clipboard, so there is nothing to snapshot or restore afterwards.
         if crate::labs::type_instead_of_paste() {
-            wait_for_conflicting_modifiers();
+            wait_for_typing_modifiers();
             return type_text(text);
         }
         let mut restore = self
@@ -226,6 +226,18 @@ fn wait_for_conflicting_modifiers() {
     }
 }
 
+/// Waits, without a deadline, until Ctrl, Shift, Alt, and Win are up before
+/// typing. Unlike Ctrl+V, a held modifier joins every typed key and turns it
+/// into a shortcut, so Ctrl waits here too.
+fn wait_for_typing_modifiers() {
+    while [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN]
+        .into_iter()
+        .any(key_down)
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Ctrl plus `key` (Ctrl+Shift plus `key` with `shift`), leaving a Ctrl the
 /// user physically holds (`control_held`) untouched: synthesizing its
 /// release would leave Windows thinking it is up while the user holds it.
@@ -303,7 +315,11 @@ fn send_inputs(inputs: &[INPUT]) -> u32 {
 
 /// Types `text` as synthetic keystrokes, never touching the clipboard.
 fn type_text(text: &str) -> Result<()> {
-    let inputs = typing_inputs(text, foreground_scan_code(VK_RETURN));
+    let inputs = typing_inputs(
+        text,
+        foreground_scan_code(VK_RETURN),
+        foreground_scan_code(VK_SHIFT),
+    );
     let sent = send_inputs(&inputs);
     if sent != inputs.len() as u32 {
         // Release only keys this typing pressed, as `send_paste_shortcut` does.
@@ -323,9 +339,9 @@ fn type_text(text: &str) -> Result<()> {
 
 /// One key down/up pair per UTF-16 unit of `text`: `KEYEVENTF_UNICODE`
 /// carries the unit in `wScan`, so any layout types it. `\r\n`, `\n`, and
-/// `\r` each become one Return press with the foreground layout's scan
-/// code. Pure, so tests cover it without sending input.
-fn typing_inputs(text: &str, return_scan: u16) -> Vec<INPUT> {
+/// `\r` each become one Shift-Return, so chat boxes insert a newline instead
+/// of sending. Pure, so tests cover it without sending input.
+fn typing_inputs(text: &str, return_scan: u16, shift_scan: u16) -> Vec<INPUT> {
     fn flush(units: &mut Vec<u16>, inputs: &mut Vec<INPUT>) {
         for unit in units.drain(..) {
             inputs.push(keyboard_input(0, unit, KEYEVENTF_UNICODE));
@@ -342,8 +358,10 @@ fn typing_inputs(text: &str, return_scan: u16) -> Vec<INPUT> {
                 characters.next_if_eq(&'\n');
             }
             flush(&mut units, &mut inputs);
+            inputs.push(keyboard_input(VK_SHIFT, shift_scan, 0));
             inputs.push(keyboard_input(VK_RETURN, return_scan, 0));
             inputs.push(keyboard_input(VK_RETURN, return_scan, KEYEVENTF_KEYUP));
+            inputs.push(keyboard_input(VK_SHIFT, shift_scan, KEYEVENTF_KEYUP));
             continue;
         }
         let mut encoded = [0; 2];
@@ -448,7 +466,7 @@ mod tests {
     #[test]
     fn typing_sends_each_unit_as_unicode_down_then_up() {
         assert_eq!(
-            typed(&typing_inputs("hi", 0x1C)),
+            typed(&typing_inputs("hi", 0x1C, 0x2A)),
             [
                 (0, u16::from(b'h'), KEYEVENTF_UNICODE),
                 (0, u16::from(b'h'), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
@@ -456,27 +474,33 @@ mod tests {
                 (0, u16::from(b'i'), KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
             ]
         );
-        assert!(typing_inputs("", 0x1C).is_empty());
+        assert!(typing_inputs("", 0x1C, 0x2A).is_empty());
     }
 
     #[test]
-    fn typing_sends_each_line_break_as_one_return() {
-        let inputs = typing_inputs("a\nb\r\nc\rd", 0x1C);
-        // Four letters as Unicode pairs and three line breaks as Returns.
-        assert_eq!(inputs.len(), 4 * 2 + 3 * 2);
-        let returns = typed(&inputs)
+    fn typing_sends_each_line_break_as_one_shift_return() {
+        let inputs = typing_inputs("a\nb\r\nc\rd", 0x1C, 0x2A);
+        // Four letters as Unicode pairs and three line breaks as Shift-Return.
+        assert_eq!(inputs.len(), 4 * 2 + 3 * 4);
+        let line_breaks = typed(&inputs)
             .into_iter()
-            .filter(|(vk, _, _)| *vk == VK_RETURN)
+            .filter(|(vk, _, _)| matches!(*vk, VK_SHIFT | VK_RETURN))
             .collect::<Vec<_>>();
         assert_eq!(
-            returns,
+            line_breaks,
             [
+                (VK_SHIFT, 0x2A, 0),
                 (VK_RETURN, 0x1C, 0),
                 (VK_RETURN, 0x1C, KEYEVENTF_KEYUP),
+                (VK_SHIFT, 0x2A, KEYEVENTF_KEYUP),
+                (VK_SHIFT, 0x2A, 0),
                 (VK_RETURN, 0x1C, 0),
                 (VK_RETURN, 0x1C, KEYEVENTF_KEYUP),
+                (VK_SHIFT, 0x2A, KEYEVENTF_KEYUP),
+                (VK_SHIFT, 0x2A, 0),
                 (VK_RETURN, 0x1C, 0),
                 (VK_RETURN, 0x1C, KEYEVENTF_KEYUP),
+                (VK_SHIFT, 0x2A, KEYEVENTF_KEYUP),
             ]
         );
     }
@@ -485,7 +509,7 @@ mod tests {
     fn typing_splits_surrogate_pairs_into_two_unicode_units() {
         // U+1F600 as the UTF-16 surrogate pair Hex sends.
         assert_eq!(
-            typed(&typing_inputs("😀", 0x1C)),
+            typed(&typing_inputs("😀", 0x1C, 0x2A)),
             [
                 (0, 0xD83D, KEYEVENTF_UNICODE),
                 (0, 0xD83D, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),

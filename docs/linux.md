@@ -578,10 +578,14 @@ approved, so you're asked only once.
   - With neither, the dictation fails with "Copied to the clipboard; press
     Ctrl+V to paste" and the transcript stays on the clipboard.
 
-  There is no silent XWayland, direct-typing, uinput, or privileged
-  input-injection fallback; the only XWayland use besides the HUD is the
-  opt-in clipboard restore above. Transcript text travels on stdin, not command-line
-  arguments.
+  There is no silent XWayland, uinput, or privileged input-injection fallback;
+  the only XWayland use besides the HUD is the opt-in clipboard restore above.
+  Transcript text travels on stdin, not command-line arguments. Direct typing
+  is only the explicit Labs › Type instead of pasting path: with it on,
+  Wayland types through `wtype` (each line on stdin) and X11 through XTEST
+  with the active keymap; both send line breaks as Shift-Return, and when
+  either cannot type a character (or X11 has Caps Lock on) the dictation
+  falls back to the clipboard paste above.
 - The overlay uses layer-shell. Without it (GNOME), only the HUD opens on
   XWayland as an override-redirect, click-through window that never takes
   focus. With neither, Settings reports that the HUD is unavailable rather than

@@ -727,15 +727,13 @@ impl Keymap {
             .chunks(self.symbols_per_keycode)
             .enumerate()
             .find_map(|(index, symbols)| {
-                symbols
-                    .iter()
-                    .position(|symbol| *symbol == keysym)
-                    .map(|level| (self.min + index as u8, level))
-            })
-            .and_then(|(keycode, level)| match level {
-                0 => Some((keycode, false)),
-                1 => Some((keycode, true)),
-                _ => None,
+                let level = symbols.iter().position(|symbol| *symbol == keysym)?;
+                let keycode = self.min.checked_add(u8::try_from(index).ok()?)?;
+                match level {
+                    0 => Some((keycode, false)),
+                    1 => Some((keycode, true)),
+                    _ => None,
+                }
             })
             .ok_or_else(|| eyre!("active X11 keymap has no typing key for keysym {keysym:#x}"))
     }
@@ -764,9 +762,10 @@ impl Keymap {
 mod tests {
     use super::*;
 
-    /// A two-key fragment: keycode 8 types `a` unshifted and `A` shifted,
-    /// keycode 9 types Return alone, and keycode 10 types the euro sign only
-    /// with AltGr (level 2), which has no typing path.
+    /// A keymap fragment: keycode 8 types `a` unshifted and `A` shifted,
+    /// keycode 9 types Return alone, keycode 10 has the euro sign only with
+    /// AltGr (level 2), keycode 11 has it unshifted, and keycode 12 has the
+    /// yen sign only with AltGr.
     fn fragment() -> Keymap {
         Keymap {
             min: 8,
@@ -775,6 +774,8 @@ mod tests {
                 0x61, 0x41, 0, 0, //
                 0xff0d, 0, 0, 0, //
                 0, 0, 0x20ac, 0, //
+                0x20ac, 0, 0, 0, //
+                0, 0, 0x00a5, 0, //
             ],
         }
     }
@@ -785,7 +786,9 @@ mod tests {
         assert_eq!(keymap.typing_key(0x61).unwrap(), (8, false));
         assert_eq!(keymap.typing_key(0x41).unwrap(), (8, true));
         assert_eq!(keymap.typing_key(0xff0d).unwrap(), (9, false));
-        assert!(keymap.typing_key(0x20ac).is_err());
+        // A deep level is skipped in favor of a later unshifted key.
+        assert_eq!(keymap.typing_key(0x20ac).unwrap(), (11, false));
+        assert!(keymap.typing_key(0x00a5).is_err());
         assert!(keymap.typing_key(0x62).is_err());
     }
 }

@@ -220,38 +220,45 @@ dictation on a Mac with the toggle on.
 Type instead of pasting (`type-instead-of-paste`, every OS): while on, a
 finished dictation (the dictation shortcut, Dictate without processing, Paste
 last dictation, and meeting turns where the platform pastes them) is typed key
-by key into the focused app
-instead of going through the clipboard. Each paste path
-(`paste::Paster::paste_text` on macOS,
-`WindowsPaster::paste`, `LinuxPaster::paste_as`) reads
-`labs::type_instead_of_paste()` as it commits: it sends keystrokes and never
-snapshots, writes, or restores the clipboard, so Labs › Keep dictation on
-clipboard has nothing to keep and Terminal paste has no shortcut to send.
-Labs › Copy dictation only still wins, leaving the text on the clipboard with
-no insertion at all, and a capture's contact sheet still pastes. Continuation
-joins and Labs › Smart spacing still shape the typed text on macOS, where
-typing is the existing `keyboard::type_text` (line breaks as Shift-Return);
-Windows sends UTF-16 units through `KEYEVENTF_UNICODE` with Return for line
-breaks; Linux types through `wtype` on Wayland and XTEST keysyms (printable
-Latin-1, Shift for the second level) on X11. On Linux a dictation with a
-character the active keymap cannot type, or a failed typing run, pastes
-through the clipboard instead with a warning in process.log, so no words are
-lost. Off, insertion is exactly as before. Checks:
+by key into the focused app instead of going through the clipboard. Each paste
+path (`paste::Paster::paste_text` on macOS, `WindowsPaster::paste`,
+`LinuxPaster::paste_as`) reads `labs::type_instead_of_paste()` as it commits:
+it sends keystrokes and never snapshots, writes, or restores the clipboard, so
+Labs › Keep dictation on clipboard has nothing to keep and Terminal paste has
+no shortcut to send. On macOS `Paster::prepare` also skips its eager clipboard
+capture while typing is on. Labs › Copy dictation only still wins, leaving the
+text on the clipboard with no insertion at all, and a capture's contact sheet
+still pastes. Continuation joins and Labs › Smart spacing still shape the
+typed text on macOS, where typing is the existing `keyboard::type_text`;
+Windows, macOS, and Linux all send line breaks as Shift-Return, so chat boxes
+insert a newline instead of sending. Windows waits for Ctrl, Shift, Alt, and
+Win to lift, then sends each UTF-16 unit through `KEYEVENTF_UNICODE`. Wayland
+types through `wtype`: each line's text goes to `wtype -` on stdin, never
+argv, and each line break is one `wtype -M shift -k Return -m shift`. X11
+types through XTEST with the active keymap's first two levels (printable
+Latin-1; Shift for the second level), resolving every key before sending any
+so an untypable character never leaves half a dictation behind.
+On Linux a dictation with a character the active keymap cannot type, no
+`wtype` or virtual-keyboard protocol on Wayland, modifiers that will not
+lift, Caps Lock on X11 (which would flip each letter's case), or a failed
+typing run pastes through the clipboard instead with a warning in process.log,
+so no words are lost. Off, insertion is exactly as
+before. Checks:
 `type_instead_of_paste_is_its_own_bit_and_off_by_default` in
 [labs.rs](../../src/labs.rs);
 `contributed_options_are_labs_toggles_off_by_default` in
 [panes.rs](../../src/rune_ui/tests/panes.rs);
 `typing_sends_each_unit_as_unicode_down_then_up`,
-`typing_sends_each_line_break_as_one_return`, and
+`typing_sends_each_line_break_as_one_shift_return`, and
 `typing_splits_surrogate_pairs_into_two_unicode_units` in
 [windows/paste.rs](../../src/windows/paste.rs);
-`typing_args_type_each_line_with_return_between_them` and
+`typing_steps_keep_text_off_argv_and_line_breaks_as_shift_return`,
+`wtype_types_text_from_stdin_and_line_breaks_as_shift_return`, and
 `typing_keysyms_cover_latin_1_and_line_breaks` in
 [linux/paste.rs](../../src/linux/paste.rs); and
 `typing_keys_come_from_the_first_two_levels_only` in
 [linux/input/x11.rs](../../src/linux/input/x11.rs). Not yet observed: a real
-dictation with the toggle on on any OS; the Labs page goldens need
-regenerating on Linux with the new row.
+dictation with the toggle on on any OS.
 
 Spoken formatting (`spoken-formatting`, issue 630, every OS): while on,
 `Profiles::process_cancellable` in
