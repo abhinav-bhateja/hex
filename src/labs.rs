@@ -270,9 +270,9 @@ impl Feature {
             | Self::MeetingSummaryModel
             | Self::GnomeClipboardRestore
             | Self::MeetingNotesVocabulary
-            | Self::NotchIndicator
-            | Self::TypeInsteadOfPaste => 20261103,
+            | Self::NotchIndicator => 20261103,
             Self::MeetingFinishedEvent => 20261104,
+            Self::TypeInsteadOfPaste => 20261105,
         }
     }
 
